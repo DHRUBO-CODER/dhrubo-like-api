@@ -185,7 +185,7 @@ class handler(BaseHTTPRequestHandler):
             response = {
                 "message": "Like API is running",
                 "endpoints": {
-                    "/like": "GET with ?uid={uid}&server={server}",
+                    "/like": "GET with /like?uid={uid}&server_name={server}",
                     "/stats": "GET - API statistics"
                 },
                 "source": HIDDEN_CREDIT,
@@ -203,7 +203,7 @@ class handler(BaseHTTPRequestHandler):
         # লাইক এন্ডপয়েন্ট
         if path == "/like":
             uid = query_params.get('uid', [''])[0]
-            server = query_params.get('server', [''])[0]
+            server = query_params.get('server_name', [''])[0]
             
             if not uid or not server:
                 error_response = ErrorResponse.create("Missing uid or server parameter", 400)
