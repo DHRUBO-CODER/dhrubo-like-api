@@ -1,14 +1,11 @@
-import os
 import random
 import json
-import time
-from http.server import BaseHTTPRequestHandler, HTTPServer
-from urllib.parse import parse_qs, urlparse
-import httpx
 import asyncio
+import httpx
 from typing import Dict, Any, Optional, Tuple
+from urllib.parse import parse_qs
 
-# ==================== কনফিগারেশন ====================
+# ==================== CONFIG ====================
 
 API_URL = "https://info-api-mg24-pro.vercel.app/get?uid={}"
 CREDIT = "—͞Dʜʀᴜʙᴏ"
@@ -20,8 +17,12 @@ HIDDEN_CREDIT = CREDIT
 HIDDEN_LIKE_VALUES = LIKE_VALUES
 HIDDEN_TELEGRAM_ID = TG
 
+# ==================== DAILY LIMIT STORAGE ====================
+# Vercel serverless এ ফাইল persistent নয়, তাই simple memory use
+# এক UID একদিনে একবার
+uid_daily_record: Dict[str, str] = {}  # uid -> date string "YYYY-MM-DD"
 
-# ==================== ডাটা মডেল ====================
+# ==================== PLAYER DATA ====================
 
 class PlayerData:
     def __init__(self, uid: str, server: str, nickname: str, likes_before: int, likes_given: int):
@@ -45,7 +46,6 @@ class PlayerData:
             "devolved_by": HIDDEN_CREDIT
         }
 
-
 class ErrorResponse:
     @staticmethod
     def create(message: str, status_code: int = 400) -> Dict[str, Any]:
@@ -56,31 +56,13 @@ class ErrorResponse:
             "code": status_code
         }
 
-
-# ==================== API ফাংশন ====================
+# ==================== API ====================
 
 class LikeAPI:
-
     def __init__(self):
         self.request_count = 0
         self.success_count = 0
         self.error_count = 0
-
-        # 🔒 Daily limit config
-        self.limit_file = "daily_limits.json"
-        self.daily_limit_seconds = 86400
-
-        if not os.path.exists(self.limit_file):
-            with open(self.limit_file, "w") as f:
-                json.dump({}, f)
-
-    def load_limits(self):
-        with open(self.limit_file, "r") as f:
-            return json.load(f)
-
-    def save_limits(self, data):
-        with open(self.limit_file, "w") as f:
-            json.dump(data, f)
 
     async def fetch_player_data(self, uid: str) -> Optional[Dict[str, Any]]:
         try:
@@ -89,7 +71,6 @@ class LikeAPI:
                 response = await client.get(target_url)
                 response.raise_for_status()
                 return response.json()
-
         except httpx.TimeoutException:
             return {"error": "timeout"}
         except httpx.HTTPStatusError as e:
@@ -109,49 +90,46 @@ class LikeAPI:
         return random.choice(HIDDEN_LIKE_VALUES)
 
     def validate_uid(self, uid: str) -> bool:
-        return uid and uid.isdigit() and len(uid) <= 20
+        return uid.isdigit() and len(uid) <= 20
 
     async def process_request(self, uid: str, server: str) -> Dict[str, Any]:
+        import datetime
+
         self.request_count += 1
 
+        # UID validation
         if not self.validate_uid(uid):
             self.error_count += 1
             return ErrorResponse.create("Invalid UID format", 400)
 
-        # 🔒 Daily limit check
-        limits = self.load_limits()
-        current_time = int(time.time())
+        # Check daily limit
+        today = datetime.date.today().isoformat()
+        last_request = uid_daily_record.get(uid)
+        if last_request == today:
+            return ErrorResponse.create("UID already used today", 429)
+        uid_daily_record[uid] = today
 
-        if uid in limits:
-            last_time = limits[uid]
-            if current_time - last_time < self.daily_limit_seconds:
-                self.error_count += 1
-                remaining = self.daily_limit_seconds - (current_time - last_time)
-                hours_left = remaining // 3600
-                return ErrorResponse.create(
-                    f"This UID already received likes today. Try again after {hours_left} hours.",
-                    429
-                )
-
+        # Fetch player data
         player_data = await self.fetch_player_data(uid)
-
         if not player_data:
             self.error_count += 1
             return ErrorResponse.create("Player not found", 404)
 
-        if isinstance(player_data, dict) and "error" in player_data:
+        if "error" in player_data:
             self.error_count += 1
-            return ErrorResponse.create("Service error", 503)
+            error_map = {
+                "timeout": "Service timeout",
+                "not_found": "Player not found",
+                "http_error": "Service unavailable",
+                "unknown": "Unknown error"
+            }
+            status_code = 503 if player_data["error"] == "timeout" else 404
+            return ErrorResponse.create(error_map.get(player_data["error"], "Unknown error"), status_code)
 
         nickname, likes_before = self.extract_player_info(player_data)
         likes_given = self.generate_likes()
 
         player = PlayerData(uid, server, nickname, likes_before, likes_given)
-
-        # 🔒 Save success time
-        limits[uid] = current_time
-        self.save_limits(limits)
-
         self.success_count += 1
         return player.to_dict()
 
@@ -165,76 +143,30 @@ class LikeAPI:
             "source": HIDDEN_CREDIT
         }
 
-
 like_api = LikeAPI()
 
+# ==================== VERCEL HANDLER ====================
 
-# ==================== SERVER HANDLER ====================
+async def handler(request):
+    """Vercel serverless entrypoint"""
+    path = request.path
+    query = parse_qs(request.query_string.decode())
 
-class handler(BaseHTTPRequestHandler):
+    if path == "/" or path == "":
+        return {
+            "message": "Like API is running",
+            "source": HIDDEN_CREDIT,
+            "status": "active"
+        }
 
-    def do_GET(self):
+    if path == "/stats":
+        return like_api.get_stats()
 
-        parsed_path = urlparse(self.path)
-        path = parsed_path.path
-        query_params = parse_qs(parsed_path.query)
+    if path == "/like":
+        uid = query.get("uid", [""])[0]
+        server = query.get("server", [""])[0]
+        if not uid or not server:
+            return ErrorResponse.create("Missing uid or server parameter", 400)
+        return await like_api.process_request(uid, server)
 
-        self.send_response(200)
-        self.send_header('Content-Type', 'application/json')
-        self.send_header('Access-Control-Allow-Origin', '*')
-        self.end_headers()
-
-        if path == "/" or path == "":
-            response = {
-                "message": "Like API is running",
-                "endpoints": {
-                    "/like": "GET with ?uid={uid}&server={server}",
-                    "/stats": "GET API statistics"
-                },
-                "source": HIDDEN_CREDIT,
-                "status": "active"
-            }
-            self.wfile.write(json.dumps(response, indent=2).encode())
-            return
-
-        if path == "/stats":
-            self.wfile.write(json.dumps(like_api.get_stats(), indent=2).encode())
-            return
-
-        if path == "/like":
-            uid = query_params.get('uid', [''])[0]
-            server = query_params.get('server', [''])[0]
-
-            if not uid or not server:
-                self.wfile.write(json.dumps(
-                    ErrorResponse.create("Missing uid or server parameter", 400)
-                ).encode())
-                return
-
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            result = loop.run_until_complete(like_api.process_request(uid, server))
-            loop.close()
-
-            self.wfile.write(json.dumps(result, indent=2).encode())
-            return
-
-        self.wfile.write(json.dumps(
-            ErrorResponse.create("Endpoint not found", 404)
-        ).encode())
-
-    def log_message(self, format, *args):
-        return
-
-
-# ==================== RUN LOCAL ====================
-
-def run_local_server(port=8000):
-    server_address = ('', port)
-    httpd = HTTPServer(server_address, handler)
-    print(f"🚀 Server running at http://localhost:{port}/")
-    httpd.serve_forever()
-
-
-if __name__ == "__main__":
-    run_local_server(8000)
+    return ErrorResponse.create("Endpoint not found", 404)
