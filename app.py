@@ -11,7 +11,7 @@ from typing import Dict, Any, Optional, List, Tuple
 
 # ==================== কনফিগারেশন ====================
 
-API_URL = "https://info-api-mg24-pro.vercel.app/get?uid={}"
+API_URL = "https://dhrubo-info-api.vercel.app/get?uid={}"
 CREDIT = "—͞Dʜʀᴜʙᴏ"
 LIKE_VALUES = [111, 134, 183, 199, 121, 200]
 TG = "@DHRUBO_X_TCP"
